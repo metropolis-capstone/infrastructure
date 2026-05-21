@@ -24,6 +24,10 @@ export class DataStack extends cdk.Stack {
       }),
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      
+      //assigns passed in security group from NetworkStack to the 
+      // RDS instance, which only allows inbound on port 5432 from 
+      // the ECS and Lambda SGs. No outbound rules needed for RDS.
       securityGroups: [props.rdsSg],
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
       multiAz: false,
