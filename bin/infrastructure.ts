@@ -5,6 +5,7 @@
 import * as cdk from 'aws-cdk-lib/core';
 import { NetworkStack } from '../lib/network-stack';
 import { ApplicationStack } from '../lib/application-stack';
+import { DataStack } from '../lib/data-stack';
 
 // the App is the root of the CDK construct tree — everything lives inside it.
 const app = new cdk.App();
@@ -16,6 +17,12 @@ const network = new NetworkStack(app, 'NetworkStack', {
   // CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION are set automatically by the CDK CLI.
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+
+const data = new DataStack(app, 'DataStack', {
+  env: {account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+  vpc: network.vpc,
+  rdsSg: network.rdsSg
+})
 
 // ApplicationStack depends on NetworkStack. The VPC and security groups are passed in via props
 // so this stack knows where to place its resources and which security groups to attach.
