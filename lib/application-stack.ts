@@ -49,7 +49,7 @@ export class ApplicationStack extends cdk.Stack {
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
       desiredCapacity: 1,
       maxCapacity: 3,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      vpcSubnets: { subnets: [props.vpc.privateSubnets[0]] },
       // second EBS volume for VM Storage data. deleteOnTermination: false so the
       // volume outlives instance replacement — data survives a redeploy.
       blockDevices: [{
