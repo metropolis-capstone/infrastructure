@@ -107,11 +107,13 @@ export class ApplicationStack extends cdk.Stack {
 
     const vmAgentTaskDef = new ecs.Ec2TaskDefinition(this, 'VmAgentTaskDef', {
       executionRole: taskExecutionRole,
+      networkMode: ecs.NetworkMode.HOST,
     });
     vmAgentTaskDef.addContainer('VmAgentContainer', {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vmagent:latest'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8429 }],
+      command: ['-remoteWrite.url=http://localhost:8480/insert/0/prometheus'],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-agent',
         logGroup: new logs.LogGroup(this, 'VmAgentLogGroup', {
@@ -123,11 +125,13 @@ export class ApplicationStack extends cdk.Stack {
 
     const vmInsertTaskDef = new ecs.Ec2TaskDefinition(this, 'VmInsertTaskDef', {
       executionRole: taskExecutionRole,
+      networkMode: ecs.NetworkMode.HOST,
     });
     vmInsertTaskDef.addContainer('VmInsertContainer', {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vminsert:latest'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8480 }],
+      command: ['-storageNode=localhost:8400'],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-insert',
         logGroup: new logs.LogGroup(this, 'VmInsertLogGroup', {
@@ -139,11 +143,13 @@ export class ApplicationStack extends cdk.Stack {
 
     const vmSelectTaskDef = new ecs.Ec2TaskDefinition(this, 'VmSelectTaskDef', {
       executionRole: taskExecutionRole,
+      networkMode: ecs.NetworkMode.HOST,
     });
     vmSelectTaskDef.addContainer('VmSelectContainer', {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vmselect:latest'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8481 }],
+      command: ['-storageNode=localhost:8401'],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-select',
         logGroup: new logs.LogGroup(this, 'VmSelectLogGroup', {
@@ -157,11 +163,13 @@ export class ApplicationStack extends cdk.Stack {
     // the container reference is stored so we can call addMountPoints() on it later.
     const vmStorageTaskDef = new ecs.Ec2TaskDefinition(this, 'VmStorageTaskDef', {
       executionRole: taskExecutionRole,
+      networkMode: ecs.NetworkMode.HOST,
     });
     const vmStorageContainer = vmStorageTaskDef.addContainer('VmStorageContainer', {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vmstorage:latest'),
       memoryLimitMiB: 1024,
       portMappings: [{ containerPort: 8482 }],
+      command: ['-storageDataPath=/victoria-metrics-data'],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-storage',
         logGroup: new logs.LogGroup(this, 'VmStorageLogGroup', {
@@ -173,6 +181,7 @@ export class ApplicationStack extends cdk.Stack {
 
     const grafanaTaskDef = new ecs.Ec2TaskDefinition(this, 'GrafanaTaskDef', {
       executionRole: taskExecutionRole,
+      networkMode: ecs.NetworkMode.HOST,
     });
     grafanaTaskDef.addContainer('GrafanaContainer', {
       image: ecs.ContainerImage.fromRegistry('grafana/grafana:latest'),

@@ -16,7 +16,7 @@ export class NetworkStack extends cdk.Stack {
 
 
     this.vpc = new ec2.Vpc(this, 'Vpc', {
-      //at current I have left as one az, as we will likley be using EBS, which is scoped to AZ zone.
+      // 2 AZs: satisfies RDS subnet group requirement. ASG is pinned to privateSubnets[0] so EBS stays in AZ1.
       maxAzs: 2,
       natGateways: 1,
       subnetConfiguration: [

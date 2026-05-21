@@ -12,7 +12,6 @@ interface DataStackProps extends cdk.StackProps {
 
 export class DataStack extends cdk.Stack {
   public readonly rdsEndpoint: string;
-  public readonly ebsVolumeId: string;
 
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
@@ -37,15 +36,5 @@ export class DataStack extends cdk.Stack {
 
     // rds endpoint property made public
     this.rdsEndpoint = db.instanceEndpoint.hostname;
-
-    // new ebs volume
-    const ebsVolume = new ec2.CfnVolume(this, 'VmStorageVolume', {
-      availabilityZone: props.vpc.privateSubnets[0].availabilityZone,
-      size: 100,
-      volumeType: 'gp3',
-    });
-
-    // ebs volume id made public
-    this.ebsVolumeId = ebsVolume.ref;
   }
 }
