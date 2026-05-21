@@ -1,10 +1,14 @@
 import * as cdk from 'aws-cdk-lib/core';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as ecr from 'aws-cdk-lib/aws-ecr';
+// import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 
 // defines the inputs this stack requires from NetworkStack.
@@ -13,7 +17,6 @@ interface ApplicationStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
   albSg: ec2.ISecurityGroup;
   ecsSg: ec2.ISecurityGroup;
-  rdsSg: ec2.ISecurityGroup;
   lambdaSg: ec2.ISecurityGroup;
 }
 
@@ -47,8 +50,26 @@ export class ApplicationStack extends cdk.Stack {
       desiredCapacity: 1,
       maxCapacity: 3,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      // second EBS volume for VM Storage data. deleteOnTermination: false so the
+      // volume outlives instance replacement — data survives a redeploy.
+      blockDevices: [{
+        deviceName: '/dev/xvdb',
+        volume: autoscaling.BlockDeviceVolume.ebs(50, {
+          volumeType: autoscaling.EbsDeviceVolumeType.GP3,
+          deleteOnTermination: false,
+        }),
+      }],
     });
     asg.addSecurityGroup(props.ecsSg);
+
+    // format the volume on first boot (blkid exits non-zero if unformatted), then mount it.
+    // nofail in fstab prevents the instance hanging on boot if the volume is briefly unavailable.
+    asg.userData.addCommands(
+      'blkid /dev/xvdb || mkfs -t xfs /dev/xvdb',
+      'mkdir -p /data/vm-storage',
+      'mount /dev/xvdb /data/vm-storage || true',
+      "echo '/dev/xvdb /data/vm-storage xfs defaults,nofail 0 2' >> /etc/fstab",
+    );
 
     // ── IAM Roles ─────────────────────────────────────────────────────────────
 
@@ -62,12 +83,14 @@ export class ApplicationStack extends cdk.Stack {
     });
 
     //role for ASG to register EC2 instances with ECS cluster
-    const ec2InstanceRole = new iam.Role(this, 'Ec2InstanceRole', {
-      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonEC2ContainerServiceforEC2Role'),
-      ],
-    });
+    //EDIT: This is commented out for now because it appears it might not be 
+    // needed as an IAM role with the same permissions is auto added. 
+    // const ec2InstanceRole = new iam.Role(this, 'Ec2InstanceRole', {
+    //   assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+    //   managedPolicies: [
+    //     iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonEC2ContainerServiceforEC2Role'),
+    //   ],
+    // });
 
     // role for Lambda functions to write logs to cloudwatch and to interact with other services in the VPC
     const lambdaExecutionRole = new iam.Role(this, 'LambdaExecutionRole', {
@@ -136,7 +159,7 @@ export class ApplicationStack extends cdk.Stack {
       executionRole: taskExecutionRole,
     });
     const vmStorageContainer = vmStorageTaskDef.addContainer('VmStorageContainer', {
-      image: ecs.ContainerImage.fromRegistry('victoriametrics/victoria-metrics:latest'),
+      image: ecs.ContainerImage.fromRegistry('victoriametrics/vmstorage:latest'),
       memoryLimitMiB: 1024,
       portMappings: [{ containerPort: 8482 }],
       logging: ecs.LogDrivers.awsLogs({
@@ -170,36 +193,43 @@ export class ApplicationStack extends cdk.Stack {
       cluster: cluster,
       taskDefinition: vmAgentTaskDef,
       desiredCount: 1,
+      minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
     });
-    
-    // won't be used again so no need to store
+
     new ecs.Ec2Service(this, 'VmInsertService', {
       cluster: cluster,
       taskDefinition: vmInsertTaskDef,
       desiredCount: 1,
+      minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
     });
 
-    // same as above
     new ecs.Ec2Service(this, 'VmSelectService', {
       cluster: cluster,
       taskDefinition: vmSelectTaskDef,
       desiredCount: 1,
+      minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
     });
-    
-    //again same
+
     new ecs.Ec2Service(this, 'VmStorageService', {
       cluster: cluster,
       taskDefinition: vmStorageTaskDef,
       desiredCount: 1,
-      // mhp is to ensure that two storage tasks can never be concurrently running.
+      // mhp: 100 + mhp: 0 ensures ECS stops the old task before starting the new one —
+      // prevents two storage tasks writing to the same EBS volume simultaneously.
       maxHealthyPercent: 100,
-      minHealthyPercent: 0
-    })
+      minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
+    });
 
     const grafanaService = new ecs.Ec2Service(this, 'GrafanaService', {
       cluster: cluster,
       taskDefinition: grafanaTaskDef,
       desiredCount: 1,
+      minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
     });
 
     // ── Application Load Balancer ─────────────────────────────────────────────
@@ -211,13 +241,16 @@ export class ApplicationStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
     });
 
+    // both these listeners will need HTTPS protocol in production. 
     // open: false — albSg already defines inbound rules, prevents CDK adding a duplicate 0.0.0.0/0 ingress.
     const telemetryListener = alb.addListener('TelemetryListener', {
       port: 8429,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       open: false,
     });
     telemetryListener.addTargets('VmAgentTarget', {
       port: 8429,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [vmAgentService.loadBalancerTarget({
         containerName: 'VmAgentContainer',
         containerPort: 8429,
@@ -230,10 +263,12 @@ export class ApplicationStack extends cdk.Stack {
 
     const grafanaListener = alb.addListener('GrafanaListener', {
       port: 3000,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       open: false,
     });
     grafanaListener.addTargets('GrafanaTarget', {
       port: 3000,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [grafanaService.loadBalancerTarget({
         containerName: 'GrafanaContainer',
         containerPort: 3000,
@@ -247,8 +282,36 @@ export class ApplicationStack extends cdk.Stack {
     // ── Lambda + EventBridge ──────────────────────────────────────────────────
     // Lambda reads from VM and Grafana endpoints every 24hrs and writes to RDS
     // EventBridge triggers the Lambda on a cron schedule
+    const metricsReader = new lambda.Function(this, 'MetricsReaderFunction', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      // placeholder — real implementation reads from VM/Grafana and writes to RDS
+      code: lambda.Code.fromInline('exports.handler = async () => {};'),
+      role: lambdaExecutionRole,
+      vpc: props.vpc,
+      securityGroups: [props.lambdaSg],
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      timeout: cdk.Duration.minutes(5),
+    });
+
+    const metricsSchedule = new events.Rule(this, 'MetricsReaderSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.hours(24)),
+    });
+    metricsSchedule.addTarget(new targets.LambdaFunction(metricsReader));
 
     // ── EBS Volume ────────────────────────────────────────────────────────────
     // attached to the EC2 instance, mounted by VM Storage for persistent data
+    // host volume bridges the EC2 mount path to the task definition.
+    vmStorageTaskDef.addVolume({
+      name: 'vm-storage-data',
+      host: { sourcePath: '/data/vm-storage' },
+    });
+
+    // maps the host volume into the container at VictoriaMetrics' default data path.
+    vmStorageContainer.addMountPoints({
+      containerPath: '/victoria-metrics-data',
+      sourceVolume: 'vm-storage-data',
+      readOnly: false,
+    });
   }
 }
