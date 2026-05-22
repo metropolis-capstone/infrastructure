@@ -11,6 +11,18 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 
+// ------- COMPONENTS AND DESCRIPTIONS --------- //
+
+// ECS Cluster:empty logical grouping tied to the VPC that containers will eventually run in.
+// Auto Scaling Group - the pool of EC2 instances the cluster runs containers on, with the second EBS volume attached.
+// User Data:boot commands that format and mount the EBS volume on the EC2 instance.
+// IAM Roles:permissions that allow ECS to pull images and write logs, and Lambda to run inside the VPC.
+// Task Definitions:blueprints describing how each container should be configured and run.
+// ECS Services:managers that keep a specified number of task instances running at all times, restarting on failure.
+// Application Load Balancer:public-facing entry point that receives traffic and forwards it to the correct container.
+// Lambda + EventBridge:scheduled function that reads from VictoriaMetrics and Grafana and writes results to RDS.
+// EBS Volume:persistent disk mounted into the VM Storage container to survive instance replacement.
+
 // defines the inputs this stack requires from NetworkStack.
 // extends cdk.StackProps so standard props like env are still accepted.
 interface ApplicationStackProps extends cdk.StackProps {
@@ -21,7 +33,7 @@ interface ApplicationStackProps extends cdk.StackProps {
 }
 
 export class ApplicationStack extends cdk.Stack {
-  // props is no longer optional — the VPC and security groups are required to deploy this stack.
+  // props is no longer optional:the VPC and security groups are required to deploy this stack.
   constructor(scope: Construct, id: string, props: ApplicationStackProps) {
     super(scope, id, props);
 
@@ -36,22 +48,20 @@ export class ApplicationStack extends cdk.Stack {
     // const grafanaRepo = new ecr.Repository(this, 'GrafanaRepository');
 
     // ── ECS Cluster ───────────────────────────────────────────────────────────
-    // logical grouping for all ECS tasks and services. Tied to the VPC from NetworkStack.
+    // Just the shell. Will need to run .addCapacity to acutally add compute. 
     const cluster = new ecs.Cluster(this, 'MetropolisCluster', {
       vpc: props.vpc,
     });
 
     // ── EC2 Auto Scaling Group ────────────────────────────────────────────────
-    // provides the actual EC2 instances the ECS cluster runs containers on.
+    // provides the actual EC2 instances. Made assumptions about the size we would need. 
     // instances are placed in the private subnet and use the ECS security group defined in NetworkStack.
-    // addCapacity returns the ASG so we can attach the security group from NetworkStack to it
     const asg = cluster.addCapacity('MetropolisASG', {
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM),
       desiredCapacity: 1,
-      maxCapacity: 3,
+      maxCapacity: 1,
+      // pinning to a specific AZ, which is required to use EBS. 
       vpcSubnets: { subnets: [props.vpc.privateSubnets[0]] },
-      // second EBS volume for VM Storage data. deleteOnTermination: false so the
-      // volume outlives instance replacement — data survives a redeploy.
       blockDevices: [{
         deviceName: '/dev/xvdb',
         volume: autoscaling.BlockDeviceVolume.ebs(50, {
@@ -62,12 +72,15 @@ export class ApplicationStack extends cdk.Stack {
     });
     asg.addSecurityGroup(props.ecsSg);
 
-    // format the volume on first boot (blkid exits non-zero if unformatted), then mount it.
-    // nofail in fstab prevents the instance hanging on boot if the volume is briefly unavailable.
+    // config for the EBS volume. My understanding is weak here, but they are all essential. 
     asg.userData.addCommands(
+      // formats the disk with a file system. 
       'blkid /dev/xvdb || mkfs -t xfs /dev/xvdb',
+      // cretes the folder the disk will be accessible through.
       'mkdir -p /data/vm-storage',
+      // attached the disk to that folde.r 
       'mount /dev/xvdb /data/vm-storage || true',
+      // tells the os to repeat on every reboot. 
       "echo '/dev/xvdb /data/vm-storage xfs defaults,nofail 0 2' >> /etc/fstab",
     );
 
@@ -101,16 +114,18 @@ export class ApplicationStack extends cdk.Stack {
     })
 
     // ── ECS Task Definitions ──────────────────────────────────────────────────
-    // Ec2TaskDefinition is used because we are running on EC2 instances, not Fargate.
+    // Instructions for ECS on how to run the containers. Just a spec
     // executionRole grants ECS permission to write logs to CloudWatch for each task.
-    // addContainer attaches the container spec — image, memory, port, and log destination.
+    // addContainer attaches the container spec:image, memory, port, and log destination.
 
     const vmAgentTaskDef = new ecs.Ec2TaskDefinition(this, 'VmAgentTaskDef', {
       executionRole: taskExecutionRole,
       networkMode: ecs.NetworkMode.HOST,
     });
     vmAgentTaskDef.addContainer('VmAgentContainer', {
+      // docker image to pull
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vmagent:latest'),
+      // default assumption
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8429 }],
       command: ['-remoteWrite.url=http://localhost:8480/insert/0/prometheus'],
@@ -159,7 +174,7 @@ export class ApplicationStack extends cdk.Stack {
       }),
     });
 
-    // VM Storage needs a volume mount for the EBS volume — handled in the EBS section below.
+    // VM Storage needs a volume mount for the EBS volume:handled in the EBS section below.
     // the container reference is stored so we can call addMountPoints() on it later.
     const vmStorageTaskDef = new ecs.Ec2TaskDefinition(this, 'VmStorageTaskDef', {
       executionRole: taskExecutionRole,
@@ -167,6 +182,7 @@ export class ApplicationStack extends cdk.Stack {
     });
     const vmStorageContainer = vmStorageTaskDef.addContainer('VmStorageContainer', {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vmstorage:latest'),
+      // larger memory allocation as its a larger process so I am told. 
       memoryLimitMiB: 1024,
       portMappings: [{ containerPort: 8482 }],
       command: ['-storageDataPath=/victoria-metrics-data'],
@@ -179,6 +195,7 @@ export class ApplicationStack extends cdk.Stack {
       }),
     });
 
+    // grafana does not require a command property as it doesnt communicate with other services. 
     const grafanaTaskDef = new ecs.Ec2TaskDefinition(this, 'GrafanaTaskDef', {
       executionRole: taskExecutionRole,
       networkMode: ecs.NetworkMode.HOST,
@@ -198,10 +215,6 @@ export class ApplicationStack extends cdk.Stack {
 
     // ── ECS Services ──────────────────────────────────────────────────────────
     // one per container, each linked to the cluster and task definition.
-    // node.addDependency(asg) on every service forces CloudFormation to wait for
-    // the ASG CreationPolicy signal before creating any service. without this,
-    // CloudFormation creates services and the ASG in parallel — tasks fail to
-    // place because the ECS agent hasn't registered yet.
     const vmAgentService = new ecs.Ec2Service(this, 'VmAgentService', {
       cluster: cluster,
       taskDefinition: vmAgentTaskDef,
@@ -211,11 +224,17 @@ export class ApplicationStack extends cdk.Stack {
     });
     vmAgentService.node.addDependency(asg);
 
+    // the min and max % governs how the instance replacement is handled. DEPLOYMENT only, doesnt
+    // affect scaling. 
+    // 0 min means it is acceptable for their to be brief times where the service may be down
+    // max healthy defaults to 200 unless stated (vm storage, where we CANNOT have two simultaneous
+    // instances). 200 means that two can be up at once. 
     const vmInsertService = new ecs.Ec2Service(this, 'VmInsertService', {
       cluster: cluster,
       taskDefinition: vmInsertTaskDef,
       desiredCount: 1,
       minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
     });
     vmInsertService.node.addDependency(asg);
 
@@ -224,6 +243,8 @@ export class ApplicationStack extends cdk.Stack {
       taskDefinition: vmSelectTaskDef,
       desiredCount: 1,
       minHealthyPercent: 0,
+      // cb ensures that repeated failed deployments trigger a rollback to previous success deployment. 
+      circuitBreaker: { rollback: true },
     });
     vmSelectService.node.addDependency(asg);
 
@@ -235,6 +256,7 @@ export class ApplicationStack extends cdk.Stack {
       // prevents two storage tasks writing to the same EBS volume simultaneously.
       maxHealthyPercent: 100,
       minHealthyPercent: 0,
+      circuitBreaker: { rollback: true },
     });
     vmStorageService.node.addDependency(asg);
 
@@ -248,7 +270,7 @@ export class ApplicationStack extends cdk.Stack {
     grafanaService.node.addDependency(asg);
 
     // ── Application Load Balancer ─────────────────────────────────────────────
-    // sits in the public subnet, listeners on port 8429 (telemetry) and 3000 (Grafana)
+    // sits in the public subnet, listeners on port 8429 (metrics) and 3000 (Grafana)
     const alb = new elbv2.ApplicationLoadBalancer(this, 'MetropolisALB', {
       vpc: props.vpc,
       internetFacing: true,
@@ -257,7 +279,7 @@ export class ApplicationStack extends cdk.Stack {
     });
 
     // both these listeners will need HTTPS protocol in production. 
-    // open: false — albSg already defines inbound rules, prevents CDK adding a duplicate 0.0.0.0/0 ingress.
+    // open: false:albSg already defines inbound rules, prevents CDK adding a duplicate 0.0.0.0/0 ingress.
     const telemetryListener = alb.addListener('TelemetryListener', {
       port: 8429,
       protocol: elbv2.ApplicationProtocol.HTTP,
@@ -300,7 +322,7 @@ export class ApplicationStack extends cdk.Stack {
     const metricsReader = new lambda.Function(this, 'MetricsReaderFunction', {
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'index.handler',
-      // placeholder — real implementation reads from VM/Grafana and writes to RDS
+      // placeholder:real implementation reads from VM/Grafana and writes to RDS
       code: lambda.Code.fromInline('exports.handler = async () => {};'),
       role: lambdaExecutionRole,
       vpc: props.vpc,

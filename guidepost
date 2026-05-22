@@ -1,0 +1,39 @@
+PRE-PRODUCTION CHECKLIST
+
+The following items are intentionally deferred and must be addressed before any production deployment.
+
+1. HTTP -> HTTPS on ALB listeners
+   Both listeners (vmagent on 8429, Grafana on 3000) are currently HTTP. SSL certificates will need to be provisioned and the protocol changed to HTTPS on both listeners.
+
+2. Pin container image tags
+   All five containers (vmagent, vminsert, vmselect, vmstorage, grafana) currently use :latest. Specific version tags must be set to prevent unexpected breaking changes from upstream image updates.
+
+3. Implement Lambda function
+   The metrics reader Lambda is a placeholder. 
+
+4. Review container memory limits
+   All containers are set to reasonable defaults (512MiB, 1024MiB for vmstorage). Load testing should inform whether these need to be adjusted.
+
+5. Expand AZ coverage
+   The ASG and EBS volume are currently pinned to a single AZ. This is intentional given the EBS constraint, but introduces a single point of failure. Worth revisiting before production. Not sure what to do here. Maybe EFS is the right call?
+
+6. Change log group removal policy to RETAIN
+   All five CloudWatch log groups are set to DESTROY, meaning logs are deleted when the stack is torn down. This must be changed to RETAIN before production to preserve operational data. It is necessary now when you are iterating deployments. 
+
+KNOWN ISSUES
+
+These were surfaced by inspecting the security group changeset output during the first successful deployment.
+
+1. ecsSg egress rules are not enforced
+   cluster.addCapacity() automatically creates its own security group on the ASG (InstanceSecurityGroup) with allowAllOutbound: true. Obviously this is not what we want. Since AWS evaluates multiple attached security groups as a union, this overrides the specific egress rules defined on ecsSg (HTTPS, DNS). There's a few fix options but I haven't had chance to go too far down. 
+
+2. ALB is wired to the instance SG, not ecsSg
+   When loadBalancerTarget() is called on an ECS service, CDK automatically creates ALB ingress/egress rules pointing at InstanceSecurityGroup rather than ecsSg. This makes the albSg -> ecsSg rules defined in NetworkStack redundant. The Lambda -> ecsSg ingress rules are still effective and necessary since CDK does not auto-wire those. No fix required — redundant rules are harmless — but worth knowing when reading NetworkStack.
+   TLDR: The ALB ingress/egress rules may be redundant, but I'm too tired to investigate why this might be. 
+
+
+TESTING
+
+Tests are written using the AWS CDK assertions library and Jest. Each stack has its own test file in the test/ directory. The stacks are synthesized into CloudFormation templates at the top of each file, and the tests assert that the expected AWS resources exist with the correct properties. Tests do not deploy anything to AWS, they only verify that the CDK code produces the correct CloudFormation output. Not perfect.
+
+
