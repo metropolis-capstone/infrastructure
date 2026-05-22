@@ -68,44 +68,54 @@ export class NetworkStack extends cdk.Stack {
       allowAllOutbound: false,
     });
 
-    // ALB inbound: internet sources push telemetry to vmagent on 8429, and access Grafana dashboards on 3000.
+    // --------------- LOAD BALANCER RULES ---------------- //
+
+    // Allow inbound telemetry data from the internet to reach the ALB.
     this.albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8429));
+    // Allow inbound Grafana dashboard traffic from the internet to reach the ALB.
     this.albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3000));
 
-    // ALB outbound: forward received traffic to the ECS instances running vmagent (8429) and Grafana (3000).
+    // Allow the ALB to forward telemetry traffic onwards to the vmagent ECS container.
     this.albSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8429));
+    // Allow the ALB to forward Grafana traffic onwards to the Grafana ECS container.
     this.albSg.addEgressRule(this.ecsSg, ec2.Port.tcp(3000));
 
-    // ECS inbound: ALB forwards external traffic to vmagent (8429) and Grafana (3000).
-    this.ecsSg.addIngressRule(this.albSg, ec2.Port.tcp(8429));
-    this.ecsSg.addIngressRule(this.albSg, ec2.Port.tcp(3000));
-    // ECS inbound: Lambda reads from vmagent (8429) and Grafana (3000) on its 24hr schedule.
-    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(8429));
-    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(3000));
+    // --------------- ECS RULES ---------------- //
 
-    // ECS outbound: Lambda writes metric snapshots to RDS Postgres.
-    this.ecsSg.addEgressRule(this.rdsSg, ec2.Port.tcp(5432));
-    // ECS outbound: EC2 instances pull container images from Docker Hub (victoriametrics/*, grafana/*),
-    // register the ECS agent with the ECS control plane, and deliver logs to CloudWatch — all over HTTPS.
+    // Allow vmagent to receive telemetry forwarded by the ALB.
+    this.ecsSg.addIngressRule(this.albSg, ec2.Port.tcp(8429));
+    // Allow Grafana to receive dashboard traffic forwarded by the ALB.
+    this.ecsSg.addIngressRule(this.albSg, ec2.Port.tcp(3000));
+    // Allow Lambda to reach vmagent to manage scrape configurations.
+    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(8429));
+    // Allow Lambda to reach Grafana to read dashboard and alert state.
+    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(3000));
+    // Allow Lambda to query vmselect for time series cardinality data.
+    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(8481));
+
+    // Allow EC2 instances to pull container images, register the ECS agent, and write CloudWatch logs.
     this.ecsSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));
-    // ECS outbound: EC2 instances resolve hostnames via the VPC DNS resolver (UDP 53).
+    // Allow EC2 instances to resolve hostnames via the VPC DNS resolver.
     this.ecsSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(53));
 
-    // RDS inbound: ECS tasks write application data to Postgres.
-    this.rdsSg.addIngressRule(this.ecsSg, ec2.Port.tcp(5432));
-    // RDS inbound: Lambda writes the 24hr metric snapshots it reads from VM/Grafana.
+    // --------------- RDS RULES ---------------- //
+
+    // Allow Lambda to write recommendations to Postgres.
     this.rdsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(5432));
 
-    // Lambda outbound: reads metrics from the vmagent scrape endpoint.
+    // --------------- LAMBDA RULES ---------------- //
+
+    // Lambda -> vmagent (8429)
     this.lambdaSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8429));
-    // Lambda outbound: reads dashboard/alert state from Grafana.
+    // Lambda -> Grafana (3000)
     this.lambdaSg.addEgressRule(this.ecsSg, ec2.Port.tcp(3000));
-    // Lambda outbound: writes metric snapshots to RDS Postgres.
+    // Lambda -> vmselect (8481)
+    this.lambdaSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8481));
+    // Lambda -> RDS Postgres (5432)
     this.lambdaSg.addEgressRule(this.rdsSg, ec2.Port.tcp(5432));
-    // Lambda outbound: VPC-attached Lambda must reach CloudWatch Logs and STS over HTTPS
-    // to emit execution logs and obtain temporary credentials for its execution role.
+    // Lambda -> CloudWatch / STS (443)
     this.lambdaSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));
-    // Lambda outbound: resolves hostnames (ECS endpoints, AWS service endpoints) via the VPC DNS resolver.
+    // Lambda -> VPC DNS resolver (53)
     this.lambdaSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(53));
   }
 }
