@@ -35,6 +35,11 @@ export class NetworkStack extends cdk.Stack {
       ],
     });
 
+    // effecient way to allow outbound traffic to s3 instead of just using internet gateway
+    this.vpc.addGatewayEndpoint("S3Endpoint", {
+      service: ec2.GatewayVpcEndpointAwsService.S3
+    });
+
     // ALB sits in the public subnet and receives inbound telemetry (8429) and Grafana (3000) from the internet.
     // allowAllOutbound false — we explicitly control where the ALB can send traffic.
     this.albSg = new ec2.SecurityGroup(this, 'AlbSg', {
@@ -43,7 +48,7 @@ export class NetworkStack extends cdk.Stack {
       allowAllOutbound: false,
     });
 
-    // ECS tasks sit in the private subnet. Only the ALB and Lambda can initiate inbound connections.
+    // ECS tasks sit in the private subnet. Only the ALB can initiate inbound connections.
     // allowAllOutbound false — we explicitly control outbound to RDS.
     this.ecsSg = new ec2.SecurityGroup(this, 'EcsSg', {
       vpc: this.vpc,
@@ -51,7 +56,8 @@ export class NetworkStack extends cdk.Stack {
       allowAllOutbound: false,
     });
 
-    // RDS sits in the private subnet. Only ECS tasks and Lambda can connect on the Postgres port.
+    // RDS sits in the private subnet. Only ECS tasks can connect on the Postgres port; though we only care about
+    // the interface node being able to do so.
     // No outbound needed — RDS never initiates connections, resources connect to it.
     this.rdsSg = new ec2.SecurityGroup(this, 'RdsSg', {
       vpc: this.vpc,
@@ -77,13 +83,21 @@ export class NetworkStack extends cdk.Stack {
     this.ecsSg.addIngressRule(this.albSg, ec2.Port.tcp(8429));
     // Allow Grafana to receive dashboard traffic forwarded by the ALB.
     this.ecsSg.addIngressRule(this.albSg, ec2.Port.tcp(3000));
-    // Allow Lambda to reach vmagent to manage scrape configurations.
-    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(8429));
-    // Allow Lambda to reach Grafana to read dashboard and alert state.
-    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(3000));
-    // Allow Lambda to query vmselect for time series cardinality data.
-    this.ecsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(8481));
-
+    // Allow cross node ecs traffic to the vmstorage write port; this is to insert data via vminsert
+    this.ecsSg.addIngressRule(this.ecsSg, ec2.Port.tcp(8400));
+    // As above but for the read node; this is so vmselect can query.
+    this.ecsSg.addIngressRule(this.ecsSg, ec2.Port.tcp(8401));
+    // As above but for vmselect; this is so grafana can forward queries to vmselect.
+    this.ecsSg.addIngressRule(this.ecsSg, ec2.Port.tcp(8481));
+    // =========== egress rules ============
+    // Allow cross node ecs traffic to the vmstorage write port; this is to insert data via vminsert
+    this.ecsSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8400));
+    // As above but for the read node; this is so vmselect can query.
+    this.ecsSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8401));
+    // As above but for vmselect; this is so grafana can forward queries to vmselect.
+    this.ecsSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8481));
+    // Allow EC2 nodes to communicate with our RDS postgres
+    this.ecsSg.addEgressRule(this.rdsSg, ec2.Port.tcp(5432));
     // Allow EC2 instances to pull container images, register the ECS agent, and write CloudWatch logs.
     this.ecsSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));
     // Allow EC2 instances to resolve hostnames via the VPC DNS resolver.
@@ -91,7 +105,7 @@ export class NetworkStack extends cdk.Stack {
 
     // --------------- RDS RULES ---------------- //
 
-    // Allow Lambda to write recommendations to Postgres.
-    this.rdsSg.addIngressRule(this.lambdaSg, ec2.Port.tcp(5432));
+    // Allow EC2 node to write recommendations to Postgres.
+    this.rdsSg.addIngressRule(this.ecsSg, ec2.Port.tcp(5432));
   }
 }
