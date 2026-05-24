@@ -7,7 +7,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as serviceDiscover from 'aws-cdk-lib/aws-servicediscovery';
+import * as serviceDiscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
@@ -101,6 +101,12 @@ export class ApplicationStack extends cdk.Stack {
       "echo '/dev/xvdb /data/vm-storage xfs defaults,nofail 0 2' >> /etc/fstab",
     );
 
+    // cloud map namespace to facilitate service discovery
+    const namespace = new serviceDiscovery.PrivateDnsNamespace(this, "Namespace", {
+      name: "trickl.local",
+      vpc: props.vpc
+    });
+    
     // ── IAM Roles ─────────────────────────────────────────────────────────────
 
     // role to ensure ECS can write output logs to cloudwatch and pull container Images from ECS
@@ -122,13 +128,6 @@ export class ApplicationStack extends cdk.Stack {
     //   ],
     // });
 
-    // role for Lambda functions to write logs to cloudwatch and to interact with other services in the VPC
-    const lambdaExecutionRole = new iam.Role(this, 'LambdaExecutionRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole')
-      ]
-    })
 
     // ── ECS Task Definitions ──────────────────────────────────────────────────
     // Instructions for ECS on how to run the containers. Just a spec
@@ -239,7 +238,7 @@ export class ApplicationStack extends cdk.Stack {
       minHealthyPercent: 0,
       circuitBreaker: { rollback: true },
     });
-    vmAgentService.node.addDependency(asg);
+    vmAgentService.node.addDependency(interfaceASG);
 
     // the min and max % governs how the instance replacement is handled. DEPLOYMENT only, doesnt
     // affect scaling. 
@@ -253,7 +252,7 @@ export class ApplicationStack extends cdk.Stack {
       minHealthyPercent: 0,
       circuitBreaker: { rollback: true },
     });
-    vmInsertService.node.addDependency(asg);
+    vmInsertService.node.addDependency(interfaceASG);
 
     const vmSelectService = new ecs.Ec2Service(this, 'VmSelectService', {
       cluster: cluster,
@@ -262,8 +261,12 @@ export class ApplicationStack extends cdk.Stack {
       minHealthyPercent: 0,
       // cb ensures that repeated failed deployments trigger a rollback to previous success deployment. 
       circuitBreaker: { rollback: true },
+      cloudMapOptions: {
+        name: "vmselect",
+        cloudMapNamespace: namespace,
+      }
     });
-    vmSelectService.node.addDependency(asg);
+    vmSelectService.node.addDependency(selectASG);
 
     const vmStorageService = new ecs.Ec2Service(this, 'VmStorageService', {
       cluster: cluster,
@@ -274,8 +277,12 @@ export class ApplicationStack extends cdk.Stack {
       maxHealthyPercent: 100,
       minHealthyPercent: 0,
       circuitBreaker: { rollback: true },
+      cloudMapOptions: {
+        name: "vmstorage",
+        cloudMapNamespace: namespace,
+      }
     });
-    vmStorageService.node.addDependency(asg);
+    vmStorageService.node.addDependency(storageASG);
 
     const grafanaService = new ecs.Ec2Service(this, 'GrafanaService', {
       cluster: cluster,
@@ -284,7 +291,7 @@ export class ApplicationStack extends cdk.Stack {
       minHealthyPercent: 0,
       circuitBreaker: { rollback: true },
     });
-    grafanaService.node.addDependency(asg);
+    grafanaService.node.addDependency(interfaceASG);
 
     // ── Application Load Balancer ─────────────────────────────────────────────
     // sits in the public subnet, listeners on port 8429 (metrics) and 3000 (Grafana)
