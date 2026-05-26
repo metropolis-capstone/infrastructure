@@ -237,7 +237,10 @@ export class ApplicationStack extends cdk.Stack {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vminsert:latest'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8480 }],
-      command: ['-storageNode=vmstorage.trickl.local:8400'],
+      command: [
+        '-storageNode=vmstorage.trickl.local:8400',
+        '-enableMetadata=true',
+      ],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-insert',
         logGroup: new logs.LogGroup(this, 'VmInsertLogGroup', {
@@ -255,7 +258,10 @@ export class ApplicationStack extends cdk.Stack {
       image: ecs.ContainerImage.fromRegistry('victoriametrics/vmselect:latest'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8481 }],
-      command: ['-storageNode=vmstorage.trickl.local:8401'],
+      command: [
+        '-storageNode=vmstorage.trickl.local:8401',
+        '--cacheDataPath=/cache',
+      ],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-select',
         logGroup: new logs.LogGroup(this, 'VmSelectLogGroup', {
@@ -280,7 +286,10 @@ export class ApplicationStack extends cdk.Stack {
         { containerPort: 8400 }, // vminsert write protocol
         { containerPort: 8401 }, // vmselect read protocol
       ],
-      command: ['-storageDataPath=/victoria-metrics-data'],
+      command: [
+        '-storageDataPath=/victoria-metrics-data',
+        '--retentionPeriod=1',
+      ],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-storage',
         logGroup: new logs.LogGroup(this, 'VmStorageLogGroup', {
