@@ -222,11 +222,13 @@ export class ApplicationStack extends cdk.Stack {
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 8429 }],
       command: [
+        // on-disk WAL buffer — replays buffered metrics if vminsert or vector is temporarily down
+        '--remoteWrite.tmpDataPath=/vmagentdata',
         '-remoteWrite.url=http://localhost:8480/insert/0/prometheus',
         "--remoteWrite.streamAggr.config=/etc/vmagent/aggregations.yml",
         "--remoteWrite.streamAggr.dropInput=true",
         "--remoteWrite.url=http://localhost:9090/",
-        "--remoteWrite.streamAggr.dropInput=false" 
+        "--remoteWrite.streamAggr.dropInput=false"
       ],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'vm-agent',
@@ -320,7 +322,7 @@ export class ApplicationStack extends cdk.Stack {
       networkMode: ecs.NetworkMode.HOST,
     });
     grafanaTaskDef.addContainer('GrafanaContainer', {
-      image: ecs.ContainerImage.fromAsset('../../local_host_pipeline/grafana'),
+      image: ecs.ContainerImage.fromAsset('../local_host_pipeline/grafana'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 3000 }],
       environment: {
@@ -350,7 +352,7 @@ export class ApplicationStack extends cdk.Stack {
       networkMode: ecs.NetworkMode.HOST
     });
     vectorTaskDef.addContainer("VectorContainer", {
-      image: ecs.ContainerImage.fromAsset('../../local_host_pipeline/vector'),
+      image: ecs.ContainerImage.fromAsset('../local_host_pipeline/vector'),
       memoryLimitMiB: 512,
       portMappings: [{ containerPort: 9090 }],
       command: ['--config', '/etc/vector/vector.toml'],
@@ -381,7 +383,7 @@ export class ApplicationStack extends cdk.Stack {
       host: { sourcePath: '/shared/vmagent' },
     });
     const smartMetricsContainer = smartMetricsTaskDef.addContainer('SmartMetricsContainer', {
-      image: ecs.ContainerImage.fromAsset('../../local_host_pipeline/smart_metrics'),
+      image: ecs.ContainerImage.fromAsset('../local_host_pipeline/smart_metrics'),
       memoryLimitMiB: 256,
       portMappings: [{ containerPort: 3001 }],
       environment: {
