@@ -506,6 +506,10 @@ export class ApplicationStack extends cdk.Stack {
       cloudMapOptions: {
         name: 'vmselect',
         cloudMapNamespace: namespace,
+        // HOST network mode: CDK defaults to SRV records (like bridge mode), but
+        // plain hostname lookups query for A records. Force A so that
+        // vmselect.trickl.local resolves correctly from grafana.
+        dnsRecordType: serviceDiscovery.DnsRecordType.A,
       },
     });
     vmSelectService.node.addDependency(selectCP);
@@ -528,6 +532,8 @@ export class ApplicationStack extends cdk.Stack {
       cloudMapOptions: {
         name: 'vmstorage',
         cloudMapNamespace: namespace,
+        // Same reason as vmselect — force A records for plain hostname resolution.
+        dnsRecordType: serviceDiscovery.DnsRecordType.A,
       },
     });
     vmStorageService.node.addDependency(storageCP);
