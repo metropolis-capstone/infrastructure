@@ -145,6 +145,17 @@ export class ApplicationStack extends cdk.Stack {
     });
     cluster.addAsgCapacityProvider(storageCP);
 
+    // Interface node bootstrap — run on every boot.
+    // Creates the shared vmagent config directory and seeds a valid empty
+    // aggregations.yml so vmagent can start before smart-metrics has written
+    // its first real config. Smart-metrics overwrites this file on its first
+    // cron run and signals vmagent to hot-reload.
+    // -n flag: only write the file if it doesn't already exist (idempotent on reboot).
+    interfaceAsg.userData.addCommands(
+      'mkdir -p /shared/vmagent',
+      '[ -f /shared/vmagent/aggregations.yml ] || echo "[]" > /shared/vmagent/aggregations.yml',
+    );
+
     // EBS mount commands — run on every boot of the storage node.
     // blkid check prevents mkfs from reformatting an already-populated volume on reboot.
     storageAsg.userData.addCommands(
