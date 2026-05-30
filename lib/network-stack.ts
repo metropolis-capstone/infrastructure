@@ -67,15 +67,20 @@ export class NetworkStack extends cdk.Stack {
 
     // --------------- LOAD BALANCER RULES ---------------- //
 
-    // Allow inbound telemetry data from the internet to reach the ALB.
+    // Allow inbound telemetry data from the internet to reach the ALB (HTTPS).
     this.albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8429));
-    // Allow inbound Grafana dashboard traffic from the internet to reach the ALB.
-    this.albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3000));
+    // Allow inbound HTTPS Grafana traffic from the internet.
+    this.albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));
+    // Allow inbound HTTP so the ALB can issue HTTP→HTTPS redirects.
+    this.albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80));
 
-    // Allow the ALB to forward telemetry traffic onwards to the vmagent ECS container.
+    // Allow the ALB to forward telemetry traffic to the vmagent container.
     this.albSg.addEgressRule(this.ecsSg, ec2.Port.tcp(8429));
-    // Allow the ALB to forward Grafana traffic onwards to the Grafana ECS container.
+    // Allow the ALB to forward Grafana traffic to the Grafana container.
     this.albSg.addEgressRule(this.ecsSg, ec2.Port.tcp(3000));
+    // Allow the ALB to call Cognito's token endpoint to complete the OIDC auth
+    // code exchange. Required because allowAllOutbound is false on this SG.
+    this.albSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));
 
     // --------------- ECS RULES ---------------- //
 

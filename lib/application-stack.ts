@@ -5,10 +5,13 @@ import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as elbv2Actions from 'aws-cdk-lib/aws-elasticloadbalancingv2-actions';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as serviceDiscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import { Construct } from 'constructs';
 
 // ------- COMPONENTS AND DESCRIPTIONS --------- //
@@ -38,6 +41,53 @@ export class ApplicationStack extends cdk.Stack {
   // props is no longer optional:the VPC and security groups are required to deploy this stack.
   constructor(scope: Construct, id: string, props: ApplicationStackProps) {
     super(scope, id, props);
+
+    // ── Deploy-time parameters ────────────────────────────────────────────────
+    const certificateArn = new cdk.CfnParameter(this, 'CertificateArn', {
+      type: 'String',
+      description: 'ARN of an ACM certificate covering DomainName, used for HTTPS on the ALB.',
+    });
+
+    const domainName = new cdk.CfnParameter(this, 'DomainName', {
+      type: 'String',
+      description: 'The domain/subdomain pointing at this ALB (e.g. grafana.yourdomain.com). Used as the Cognito OIDC callback URL.',
+    });
+
+    // ── Cognito ───────────────────────────────────────────────────────────────
+    // Self-signup disabled — only admin-created users can authenticate.
+    const userPool = new cognito.UserPool(this, 'UserPool', {
+      selfSignUpEnabled: false,
+      signInAliases: { email: true },
+      autoVerify: { email: true },
+      passwordPolicy: {
+        minLength: 8,
+        requireLowercase: true,
+        requireUppercase: true,
+        requireDigits: true,
+        requireSymbols: false,
+      },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Domain prefix derived from account ID — globally unique without requiring
+    // a user-supplied parameter.
+    const userPoolDomain = userPool.addDomain('CognitoDomain', {
+      cognitoDomain: {
+        domainPrefix: `metropolis-${cdk.Aws.ACCOUNT_ID}`,
+      },
+    });
+
+    const userPoolClient = userPool.addClient('AlbClient', {
+      generateSecret: true,
+      oAuth: {
+        flows: { authorizationCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+        callbackUrls: [`https://${domainName.valueAsString}/oauth2/idpresponse`],
+        logoutUrls: [`https://${domainName.valueAsString}`],
+      },
+    });
+
+    const certificate = acm.Certificate.fromCertificateArn(this, 'Certificate', certificateArn.valueAsString);
 
     // ── ECR ───────────────────────────────────────────────────────────────────
     // repositories to store images for pulldown on new container creation. They are pushed to the their
@@ -365,6 +415,13 @@ export class ApplicationStack extends cdk.Stack {
         // so localhost:3001 resolves correctly. docker-compose uses the service
         // name (http://smart-metrics:3001) instead.
         SMART_METRICS_INTERNAL_URL: 'http://localhost:3001',
+        // ALB auth proxy — Grafana trusts the identity header set by the ALB
+        // after OIDC authentication, auto-signing users in without a second
+        // Grafana login prompt.
+        GF_AUTH_PROXY_ENABLED: 'true',
+        GF_AUTH_PROXY_HEADER_NAME: 'X-Amzn-Oidc-Identity',
+        GF_AUTH_PROXY_HEADER_PROPERTY: 'username',
+        GF_AUTH_PROXY_AUTO_SIGN_UP: 'true',
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'grafana',
@@ -609,9 +666,24 @@ export class ApplicationStack extends cdk.Stack {
     // Listeners are added here, after the services, because they need service references.
     // Both listeners will need HTTPS protocol in production. 
     // open: false:albSg already defines inbound rules, prevents CDK adding a duplicate 0.0.0.0/0 ingress.
+    // ── HTTP → HTTPS redirect ─────────────────────────────────────────────────
+    // Port 80 accepts plain HTTP and issues a 301 to the HTTPS equivalent.
+    // No backend target needed — the redirect is handled entirely by the ALB.
+    alb.addListener('HttpRedirectListener', {
+      port: 80,
+      protocol: elbv2.ApplicationProtocol.HTTP,
+      open: false,
+      defaultAction: elbv2.ListenerAction.redirect({
+        protocol: 'HTTPS',
+        port: '443',
+        permanent: true,
+      }),
+    });
+
     const telemetryListener = alb.addListener('TelemetryListener', {
       port: 8429,
-      protocol: elbv2.ApplicationProtocol.HTTP,
+      protocol: elbv2.ApplicationProtocol.HTTPS,
+      certificates: [certificate],
       open: false,
     });
     telemetryListener.addTargets('VmAgentTarget', {
@@ -627,12 +699,11 @@ export class ApplicationStack extends cdk.Stack {
       },
     });
 
-    const grafanaListener = alb.addListener('GrafanaListener', {
-      port: 3000,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      open: false,
-    });
-    grafanaListener.addTargets('GrafanaTarget', {
+    // OIDC authentication is enforced at the ALB before any request reaches
+    // Grafana. The Grafana container trusts the X-Amzn-Oidc-Identity header
+    // set by the ALB to auto-sign users in (GF_AUTH_PROXY_* env vars).
+    const grafanaTargetGroup = new elbv2.ApplicationTargetGroup(this, 'GrafanaTargetGroup', {
+      vpc: props.vpc,
       port: 3000,
       protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [grafanaService.loadBalancerTarget({
@@ -643,6 +714,21 @@ export class ApplicationStack extends cdk.Stack {
         path: '/api/health',
         interval: cdk.Duration.seconds(30),
       },
+    });
+
+    const grafanaListener = alb.addListener('GrafanaListener', {
+      port: 443,
+      protocol: elbv2.ApplicationProtocol.HTTPS,
+      certificates: [certificate],
+      open: false,
+    });
+    grafanaListener.addAction('GrafanaOidcAction', {
+      action: new elbv2Actions.AuthenticateCognitoAction({
+        userPool,
+        userPoolClient,
+        userPoolDomain,
+        next: elbv2.ListenerAction.forward([grafanaTargetGroup]),
+      }),
     });
 
 
@@ -659,6 +745,13 @@ export class ApplicationStack extends cdk.Stack {
       containerPath: '/victoria-metrics-data',
       sourceVolume: 'vm-storage-data',
       readOnly: false,
+    });
+
+    // ── Outputs ───────────────────────────────────────────────────────────────
+    // After deploying, point your domain's DNS at this value.
+    new cdk.CfnOutput(this, 'AlbDnsName', {
+      value: alb.loadBalancerDnsName,
+      description: 'Point your domain DNS (CNAME or ALIAS) at this ALB address.',
     });
   }
 }
