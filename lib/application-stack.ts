@@ -361,6 +361,10 @@ export class ApplicationStack extends cdk.Stack {
         GF_SECURITY_ADMIN_USER: 'admin',
         // TODO pre-prod: move to Secrets Manager
         GF_SECURITY_ADMIN_PASSWORD: 'admin',
+        // HOST mode: Grafana and smart-metrics share the EC2 network namespace,
+        // so localhost:3001 resolves correctly. docker-compose uses the service
+        // name (http://smart-metrics:3001) instead.
+        SMART_METRICS_INTERNAL_URL: 'http://localhost:3001',
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'grafana',
